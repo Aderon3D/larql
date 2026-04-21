@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::io::{BufReader, Read, Seek};
 use std::path::Path;
 
-use ndarray::{Array2, ShapeBuilder};
+use ndarray::Array2;
 
 use crate::weights::ModelWeights;
 use crate::detect::ModelError;
@@ -88,11 +88,11 @@ impl GgufValue {
 // ═══════════════════════════════════════════════════════════════
 
 pub struct GgufTensorInfo {
-    name: String,
-    n_dims: u32,
-    dims: Vec<u64>,
-    tensor_type: u32,
-    offset: u64,
+    pub name: String,
+    pub n_dims: u32,
+    pub dims: Vec<u64>,
+    pub tensor_type: u32,
+    pub offset: u64,
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -151,10 +151,12 @@ impl GgufFile {
             tensor_infos.push(GgufTensorInfo { name, n_dims, dims, tensor_type, offset });
         }
 
-        // Data starts at next alignment boundary (32 bytes)
+        // Data starts at next alignment boundary
         let pos = r.stream_position()
             .map_err(ModelError::Io)?;
-        let alignment = 32u64;
+        let alignment = metadata.get("general.alignment")
+            .and_then(|v| v.as_u32())
+            .unwrap_or(32) as u64;
         let data_offset = pos.div_ceil(alignment) * alignment;
 
         Ok(GgufFile {
@@ -191,6 +193,9 @@ impl GgufFile {
 
             // Normalize key name (strip GGUF prefixes)
             let key = normalize_gguf_key(&info.name);
+            if info.name.contains("norm") || info.name.contains("q_proj") {
+                println!("GGUF Key: {} -> Normalized: {}", info.name, key);
+            }
 
             match info.n_dims {
                 2 => {
@@ -203,14 +208,13 @@ impl GgufFile {
                     // To get the correct [rows, cols] matrix in row-major ndarray,
                     // we swap the dimensions and use Fortran (column-major) layout,
                     // then convert to standard (C) layout via .as_standard_layout().
-                    let ne0 = info.dims[0] as usize; // columns in GGML
-                    let ne1 = info.dims[1] as usize; // rows in GGML
-                    // Shape is (rows, cols) = (ne1, ne0) in standard math convention.
-                    // Data is column-major, so we create with Fortran layout.
-                    let arr = Array2::from_shape_vec((ne1, ne0).f(), floats)
+                    let ne0 = info.dims[0] as usize; // width / columns
+                    let ne1 = info.dims[1] as usize; // height / rows
+                    // GGUF tensors are stored with the first dimension (ne0) being 
+                    // the inner/contiguous dimension (standard row-major logic 
+                    // for a [ne1, ne0] matrix).
+                    let arr = Array2::from_shape_vec((ne1, ne0), floats)
                         .map_err(|e| ModelError::Parse(format!("tensor {}: {}", info.name, e)))?;
-                    // Convert to standard (C/row-major) layout for compatibility
-                    let arr = arr.as_standard_layout().into_owned();
                     tensors.insert(key, arr.into_shared());
                 }
                 1 => {
@@ -264,18 +268,11 @@ impl GgufFile {
             other => other,
         };
 
-        // Gemma 4's attention.key_length reports a different dimension than
-        // per-head dim; override with hidden_size / num_heads (standard formula)
+        // Gemma 4 varies head_dim depending on the model scale.
+        // It is correctly reported via attention.key_length. E2B is 256, E4B is 512.
         let hidden_size = get_arch_u32("embedding_length");
         let num_heads = get_arch_u32("attention.head_count");
-        let head_dim = if arch == "gemma4" && num_heads > 0 {
-            // Gemma 4: Q matrix rows = num_heads × head_dim where head_dim = hidden/num_heads × scale
-            // For gemma-4-e2b: 1536 / 8 = 192, but actual is 256. Use 2×(hidden/heads) as heuristic.
-            // Better: derive from known value 2048 Q rows / 8 heads = 256
-            256
-        } else {
-            get_arch_u32("attention.key_length")
-        };
+        let head_dim = get_arch_u32("attention.key_length");
 
         serde_json::json!({
             "model_type": model_type,
@@ -498,6 +495,8 @@ pub fn normalize_gguf_key(name: &str) -> String {
 
     name
         .replace("blk.", "layers.")
+        .replace("attn_q_norm.", "self_attn.q_norm.")
+        .replace("attn_k_norm.", "self_attn.k_norm.")
         .replace("attn_q.", "self_attn.q_proj.")
         .replace("attn_k.", "self_attn.k_proj.")
         .replace("attn_v.", "self_attn.v_proj.")
@@ -506,7 +505,9 @@ pub fn normalize_gguf_key(name: &str) -> String {
         .replace("ffn_up.", "mlp.up_proj.")
         .replace("ffn_down.", "mlp.down_proj.")
         .replace("attn_norm.", "input_layernorm.")
-        .replace("ffn_norm.", "post_attention_layernorm.")
+        .replace("post_attention_norm.", "post_attention_layernorm.")
+        .replace("ffn_norm.", "pre_feedforward_layernorm.")
+        .replace("post_ffw_norm.", "post_feedforward_layernorm.")
         .replace("token_embd.", "embed_tokens.")
         .replace("output_norm.", "norm.")
         .replace("output.", "lm_head.")

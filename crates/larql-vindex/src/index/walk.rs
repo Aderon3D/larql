@@ -186,7 +186,7 @@ impl VectorIndex {
     }
 
     /// Prefetch next layer's interleaved data into page cache.
-    pub fn prefetch_interleaved_layer(&self, layer: usize) {
+    pub fn prefetch_interleaved_layer(&self, _layer: usize) {
         #[cfg(unix)]
         if let Some(ref mmap) = self.interleaved_mmap {
             let intermediate = self.num_features(layer);
@@ -273,7 +273,7 @@ impl VectorIndex {
     }
 
     /// Prefetch next layer's Q4 data.
-    pub fn prefetch_interleaved_q4_layer(&self, layer: usize) {
+    pub fn prefetch_interleaved_q4_layer(&self, _layer: usize) {
         #[cfg(unix)]
         if let Some(ref mmap) = self.interleaved_q4_mmap {
             let intermediate = self.num_features(layer);

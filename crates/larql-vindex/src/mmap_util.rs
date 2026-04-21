@@ -27,7 +27,7 @@ pub unsafe fn mmap_optimized(file: &std::fs::File) -> Result<memmap2::Mmap, std:
 
 /// Apply sequential + willneed hints to an existing mmap.
 /// Call after Mmap::map() to optimize access patterns.
-pub fn advise_sequential(mmap: &memmap2::Mmap) {
+pub fn advise_sequential(_mmap: &memmap2::Mmap) {
     #[cfg(unix)]
     {
         let ptr = mmap.as_ptr() as *mut libc::c_void;
