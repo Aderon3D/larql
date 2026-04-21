@@ -25,7 +25,12 @@ memmap2 = "0.9"
 libc = "0.2"
 
 # Matrix ops (BLAS-accelerated)
+[target.'cfg(not(windows))'.dependencies]
 ndarray = { version = "0.16", features = ["blas"] }
+
+[target.'cfg(windows)'.dependencies]
+ndarray = { version = "0.16" }
+
 
 # Tokenizer
 tokenizers = "0.21"

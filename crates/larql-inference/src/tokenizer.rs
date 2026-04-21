@@ -6,10 +6,14 @@ use crate::error::InferenceError;
 
 /// Load a tokenizer from a model directory.
 pub fn load_tokenizer(model_dir: &Path) -> Result<tokenizers::Tokenizer, InferenceError> {
-    let path = model_dir.join("tokenizer.json");
+    let mut path = model_dir.join("tokenizer.json");
+    if !path.exists() {
+        // Fallback to gemma-tokenizer.json in current directory or root
+        path = Path::new("gemma-tokenizer.json").to_path_buf();
+    }
     if !path.exists() {
         return Err(InferenceError::MissingTensor(
-            "tokenizer.json not found".into(),
+            "tokenizer.json not found in model dir or root".into(),
         ));
     }
     tokenizers::Tokenizer::from_file(&path).map_err(|e| InferenceError::Parse(e.to_string()))

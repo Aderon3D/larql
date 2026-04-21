@@ -16,7 +16,12 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 # Matrix types (all compute via larql-compute)
-ndarray = "0.16"
+[target.'cfg(not(windows))'.dependencies]
+ndarray = { version = "0.16", features = ["blas"] }
+
+[target.'cfg(windows)'.dependencies]
+ndarray = { version = "0.16" }
+
 
 # Tokenizer (for embeddings loading + token resolution)
 tokenizers = "0.21"
@@ -28,13 +33,13 @@ sha2 = "0.10"
 safetensors = "0.5"
 memmap2 = "0.9"
 
-# OS-level mmap hints (madvise)
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
 # HuggingFace Hub integration
 hf-hub = "0.5"
 reqwest = { version = "0.12", features = ["blocking", "json"] }
+
+# OS-level mmap hints (madvise)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [features]
 default = []

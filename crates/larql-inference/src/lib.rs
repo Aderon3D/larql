@@ -1,3 +1,4 @@
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 extern crate blas_src;
 
 pub mod attention;

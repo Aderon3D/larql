@@ -175,24 +175,41 @@ pub fn run(args: ExtractIndexArgs) -> Result<(), Box<dyn std::error::Error>> {
         let output = &args.output;
 
         // Find or create tokenizer
-        let tok_path = model_path.join("tokenizer.json");
+        let mut tok_path = model_path.join("tokenizer.json");
+        if !tok_path.exists() {
+            // Fallback to root gemma-tokenizer.json
+            tok_path = std::path::PathBuf::from("gemma-tokenizer.json");
+        }
         let tokenizer = if tok_path.exists() {
             larql_vindex::tokenizers::Tokenizer::from_file(&tok_path)
                 .map_err(|e| format!("failed to load tokenizer: {e}"))?
         } else {
-            return Err(format!("tokenizer.json not found at {}", model_path.display()).into());
+            return Err(format!("tokenizer.json not found at {} or in root", model_path.display()).into());
         };
 
-        larql_vindex::build_vindex_streaming(
-            &model_path,
-            &tokenizer,
-            model_name,
-            output,
-            args.down_top_k,
-            level,
-            dtype,
-            &mut callbacks,
-        )?;
+        if model_path.is_file() && model_path.extension().map_or(false, |ext| ext == "gguf") {
+            larql_vindex::build_vindex_streaming_gguf(
+                &model_path,
+                &tokenizer,
+                model_name,
+                output,
+                args.down_top_k,
+                level,
+                dtype,
+                &mut callbacks,
+            )?;
+        } else {
+            larql_vindex::build_vindex_streaming(
+                &model_path,
+                &tokenizer,
+                model_name,
+                output,
+                args.down_top_k,
+                level,
+                dtype,
+                &mut callbacks,
+            )?;
+        }
     }
 
     callbacks.feature_bar.finish_and_clear();
