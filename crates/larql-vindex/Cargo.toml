@@ -20,7 +20,7 @@ thiserror = { workspace = true }
 ndarray = { version = "0.16", features = ["blas"] }
 
 [target.'cfg(windows)'.dependencies]
-ndarray = { version = "0.16" }
+ndarray = { version = "0.16", features = ["rayon"] }
 
 
 # Tokenizer (for embeddings loading + token resolution)
@@ -36,6 +36,9 @@ memmap2 = "0.9"
 # HuggingFace Hub integration
 hf-hub = "0.5"
 reqwest = { version = "0.12", features = ["blocking", "json"] }
+
+# Parallelism
+rayon = "1.12"
 
 # OS-level mmap hints (madvise)
 [target.'cfg(unix)'.dependencies]

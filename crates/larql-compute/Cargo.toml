@@ -14,7 +14,7 @@ categories = ["science"]
 ndarray = { version = "0.16", features = ["blas"] }
 
 [target.'cfg(windows)'.dependencies]
-ndarray = { version = "0.16" }
+ndarray = { version = "0.16", features = ["rayon"] }
 
 
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -99,6 +99,11 @@ pub struct GgufTensorInfo {
 // GGUF reader
 // ═══════════════════════════════════════════════════════════════
 
+enum TensorData {
+    Array(Array2<f32>),
+    Vector(Vec<f32>),
+}
+
 pub struct GgufFile {
     pub metadata: HashMap<String, GgufValue>,
     pub tensor_infos: Vec<GgufTensorInfo>,
@@ -134,6 +139,9 @@ impl GgufFile {
         for _ in 0..n_metadata {
             let key = read_string(&mut r)?;
             let value = read_value(&mut r)?;
+            if key.contains("attention") || key.contains("head") || key.contains("hidden") {
+                eprintln!("DEBUG GGUF KV: {} = {:?}", key, value);
+            }
             metadata.insert(key, value);
         }
 
@@ -170,13 +178,13 @@ impl GgufFile {
     /// Load all tensors, dequantizing to f32.
     #[allow(clippy::type_complexity)]
     pub fn load_tensors(&self) -> Result<(HashMap<String, crate::WeightArray>, HashMap<String, Vec<f32>>), ModelError> {
+        use rayon::prelude::*;
+        
         let file = std::fs::File::open(&self.path)?;
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
 
-        let mut tensors = HashMap::new();
-        let mut vectors = HashMap::new();
-
-        for info in &self.tensor_infos {
+        // Dequantize in parallel
+        let results: Vec<Result<Option<(String, TensorData)>, ModelError>> = self.tensor_infos.par_iter().map(|info| {
             let abs_offset = self.data_offset + info.offset;
             let n_elements: u64 = info.dims.iter().product();
 
@@ -193,34 +201,31 @@ impl GgufFile {
 
             // Normalize key name (strip GGUF prefixes)
             let key = normalize_gguf_key(&info.name);
-            if info.name.contains("norm") || info.name.contains("q_proj") {
-                println!("GGUF Key: {} -> Normalized: {}", info.name, key);
-            }
-
+            
             match info.n_dims {
                 2 => {
-                    // GGUF/GGML uses column-major (Fortran) dimension ordering:
-                    //   dims[0] = number of columns (innermost/fastest)
-                    //   dims[1] = number of rows (outermost)
-                    // Data is laid out in column-major order.
-                    //
-                    // ndarray expects row-major (C) order by default.
-                    // To get the correct [rows, cols] matrix in row-major ndarray,
-                    // we swap the dimensions and use Fortran (column-major) layout,
-                    // then convert to standard (C) layout via .as_standard_layout().
                     let ne0 = info.dims[0] as usize; // width / columns
                     let ne1 = info.dims[1] as usize; // height / rows
-                    // GGUF tensors are stored with the first dimension (ne0) being 
-                    // the inner/contiguous dimension (standard row-major logic 
-                    // for a [ne1, ne0] matrix).
                     let arr = Array2::from_shape_vec((ne1, ne0), floats)
                         .map_err(|e| ModelError::Parse(format!("tensor {}: {}", info.name, e)))?;
-                    tensors.insert(key, arr.into_shared());
+                    Ok(Some((key, TensorData::Array(arr))))
                 }
                 1 => {
-                    vectors.insert(key, floats);
+                    Ok(Some((key, TensorData::Vector(floats))))
                 }
-                _ => {} // skip higher-dim tensors
+                _ => Ok(None) // skip higher-dim tensors
+            }
+        }).collect();
+
+        let mut tensors = HashMap::new();
+        let mut vectors = HashMap::new();
+
+        for res in results {
+            if let Some((key, data)) = res? {
+                match data {
+                    TensorData::Array(arr) => { tensors.insert(key, arr.into_shared()); }
+                    TensorData::Vector(v) => { vectors.insert(key, v); }
+                }
             }
         }
 
@@ -273,6 +278,19 @@ impl GgufFile {
         let hidden_size = get_arch_u32("embedding_length");
         let num_heads = get_arch_u32("attention.head_count");
         let head_dim = get_arch_u32("attention.key_length");
+        // Gemma 4 sliding window head_dim and pattern
+        let head_dim_swa = get_arch_u32("attention.key_length_swa");
+        let sliding_window_pattern_bool = self.metadata.get(&format!("{prefix}attention.sliding_window_pattern"))
+            .and_then(|v| {
+                if let GgufValue::Array(arr) = v {
+                    Some(arr.iter().filter_map(|x| match x {
+                        GgufValue::Bool(b) => Some(*b),
+                        _ => None,
+                    }).collect::<Vec<bool>>())
+                } else {
+                    None
+                }
+            });
 
         serde_json::json!({
             "model_type": model_type,
@@ -282,6 +300,8 @@ impl GgufFile {
             "num_attention_heads": num_heads,
             "num_key_value_heads": get_arch_u32("attention.head_count_kv"),
             "head_dim": head_dim,
+            "head_dim_swa": if head_dim_swa > 0 { Some(head_dim_swa) } else { None },
+            "sliding_window_pattern_bool": sliding_window_pattern_bool,
             "rope_theta": get_arch_f64("rope.freq_base"),
             "vocab_size": get_arch_u32("vocab_size"),
         })

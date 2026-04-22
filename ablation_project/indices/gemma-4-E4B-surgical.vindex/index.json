@@ -1,0 +1,134 @@
+{
+  "version": 2,
+  "model": "C:/Users/alby9/.cache/lm-studio/models/lmstudio-community/gemma-4-E4B-it-GGUF/gemma-4-E4B-it-Q4_K_M.gguf",
+  "family": "gemma4",
+  "source": {
+    "huggingface_repo": "C:/Users/alby9/.cache/lm-studio/models/lmstudio-community/gemma-4-E4B-it-GGUF/gemma-4-E4B-it-Q4_K_M.gguf",
+    "huggingface_revision": null,
+    "safetensors_sha256": null,
+    "extracted_at": "2026-05-05T23:26:23Z",
+    "larql_version": "0.1.0"
+  },
+  "checksums": {
+    "embeddings.bin": "c8a776d0166ed9441d0778a6ea99c5d6373aafa8aa57e000beaabfd587da6784",
+    "gate_vectors.bin": "7c8cf4ed0ee0753f6afe5f3c24c259889ac0294ce21a4920cdf7ce8cd424a4f8",
+    "down_meta.bin": "350bde80f44252306a6e49c81ae583ccb37124829b419bee6b7d59bd6e5850b2"
+  },
+  "num_layers": 42,
+  "hidden_size": 2560,
+  "intermediate_size": 10240,
+  "vocab_size": 262144,
+  "embed_scale": 50.596443,
+  "extract_level": "all",
+  "dtype": "f32",
+  "layer_bands": {
+    "syntax": [
+      0,
+      15
+    ],
+    "knowledge": [
+      16,
+      32
+    ],
+    "output": [
+      33,
+      41
+    ]
+  },
+  "layers": [
+    {
+      "layer": 22,
+      "num_features": 10240,
+      "offset": 0,
+      "length": 104857600
+    },
+    {
+      "layer": 23,
+      "num_features": 10240,
+      "offset": 104857600,
+      "length": 104857600
+    },
+    {
+      "layer": 24,
+      "num_features": 10240,
+      "offset": 209715200,
+      "length": 104857600
+    },
+    {
+      "layer": 25,
+      "num_features": 10240,
+      "offset": 314572800,
+      "length": 104857600
+    },
+    {
+      "layer": 26,
+      "num_features": 10240,
+      "offset": 419430400,
+      "length": 104857600
+    },
+    {
+      "layer": 27,
+      "num_features": 10240,
+      "offset": 524288000,
+      "length": 104857600
+    }
+  ],
+  "down_top_k": 10,
+  "has_model_weights": false,
+  "model_config": {
+    "model_type": "gemma4",
+    "head_dim": 512,
+    "num_q_heads": 8,
+    "num_kv_heads": 2,
+    "rope_base": 1000000.0,
+    "sliding_window": null,
+    "moe": null,
+    "global_head_dim": 512,
+    "head_dim_swa": 256,
+    "sliding_window_pattern_bool": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false
+    ],
+    "attention_k_eq_v": false
+  }
+}

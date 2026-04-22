@@ -42,6 +42,10 @@ pub struct ExtractIndexArgs {
     /// Skip stages that already have output files (resume interrupted builds).
     #[arg(long)]
     resume: bool,
+
+    /// Optional layer range to extract (e.g. "10..40" or "0..10").
+    #[arg(long)]
+    layers: Option<String>,
 }
 
 fn parse_extract_level(s: &str) -> Result<larql_vindex::ExtractLevel, String> {
@@ -136,6 +140,23 @@ pub fn run(args: ExtractIndexArgs) -> Result<(), Box<dyn std::error::Error>> {
         larql_vindex::StorageDtype::F32
     };
 
+    let layer_range = if let Some(ref range_str) = args.layers {
+        if let Some((start_str, end_str)) = range_str.split_once("..") {
+            let start = start_str.parse::<usize>().unwrap_or(0);
+            let end = end_str.parse::<usize>().unwrap_or(usize::MAX);
+            Some(start..end)
+        } else if let Some((start_str, end_str)) = range_str.split_once("-") {
+            let start = start_str.parse::<usize>().unwrap_or(0);
+            let end = end_str.parse::<usize>().unwrap_or(usize::MAX);
+            Some(start..end)
+        } else {
+            let start = range_str.parse::<usize>().unwrap_or(0);
+            Some(start..start + 1)
+        }
+    } else {
+        None
+    };
+
     if let Some(ref vectors_dir) = args.from_vectors {
         // Build from existing NDJSON files
         eprintln!("Building vindex from vectors: {}", vectors_dir.display());
@@ -196,6 +217,7 @@ pub fn run(args: ExtractIndexArgs) -> Result<(), Box<dyn std::error::Error>> {
                 args.down_top_k,
                 level,
                 dtype,
+                layer_range,
                 &mut callbacks,
             )?;
         } else {

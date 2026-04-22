@@ -17,6 +17,7 @@ thiserror = { workspace = true }
 # Model weight loading
 safetensors = "0.5"
 memmap2 = "0.9"
+rayon = "1.12.0"
 
 [dev-dependencies]
 tempfile = "3"

@@ -1049,16 +1049,25 @@ impl Session {
         }
 
         // ── Phase 1: load model weights and tokenise ──
-        let (path, config, patched) = self.require_vindex()?;
-        if !config.has_model_weights {
-            return Err(LqlError::Execution(
-                "EXPLAIN INFER requires model weights. Rebuild with WITH INFERENCE.".into(),
-            ));
-        }
-        let mut cb = larql_vindex::SilentLoadCallbacks;
-        let weights = larql_vindex::load_model_weights(path, &mut cb)
-            .map_err(|e| LqlError::exec("failed to load model weights", e))?;
-        let tokenizer = larql_vindex::load_vindex_tokenizer(path)
+        let (vindex_path, config, patched) = self.require_vindex()?;
+        
+        let weights = if config.has_model_weights {
+            let mut cb = larql_vindex::SilentLoadCallbacks;
+            larql_vindex::load_model_weights(vindex_path, &mut cb)
+                .map_err(|e| LqlError::exec("failed to load model weights", e))?
+        } else {
+            // Fallback to original model GGUF
+            let model_path = std::path::Path::new(&config.model);
+            if !model_path.exists() {
+                 return Err(LqlError::Execution(
+                    format!("EXPLAIN INFER requires model weights, and the original model at {:?} was not found.", model_path)
+                ));
+            }
+            larql_models::load_gguf(model_path)
+                .map_err(|e| LqlError::exec("failed to load fallback model weights", e))?
+        };
+
+        let tokenizer = larql_vindex::load_vindex_tokenizer(vindex_path)
             .map_err(|e| LqlError::exec("failed to load tokenizer", e))?;
         let encoding = tokenizer
             .encode(prompt, true)

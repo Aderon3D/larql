@@ -92,6 +92,8 @@ pub struct ModelConfig {
     // for sliding vs global attention layers).
     /// Head dimension for global (full) attention layers. If None, all layers use head_dim.
     pub global_head_dim: Option<usize>,
+    /// Head dimension for sliding window attention (SWA) layers.
+    pub head_dim_swa: Option<usize>,
     /// Number of KV heads for global attention layers. If None, all layers use num_kv_heads.
     pub num_global_kv_heads: Option<usize>,
     /// Fraction of head_dim dimensions to apply RoPE to (0.0–1.0). If None, full rotation.
@@ -99,8 +101,11 @@ pub struct ModelConfig {
     /// Sliding window pattern: every Nth layer is full attention.
     /// E.g., 6 means layers 5, 11, 17, ... are full attention.
     pub sliding_window_pattern: Option<usize>,
-    /// Explicit per-layer type array (e.g., ["sliding_attention", "full_attention", ...]).
+    /// Explicit per-layer boolean pattern (Gemma 4: true = sliding, false = global).
     /// When present, overrides sliding_window_pattern.
+    pub sliding_window_pattern_bool: Option<Vec<bool>>,
+    /// Explicit per-layer type array (e.g., ["sliding_attention", "full_attention", ...]).
+    /// When present, overrides pattern fields.
     pub layer_types: Option<Vec<String>>,
     /// Whether value projection shares key projection (K=V) on some layers.
     pub attention_k_eq_v: bool,

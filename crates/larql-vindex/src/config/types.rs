@@ -200,6 +200,9 @@ pub struct VindexModelConfig {
     /// Gemma 4: 512 for global layers, head_dim (256) for sliding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub global_head_dim: Option<usize>,
+    /// Head dimension for sliding window attention (SWA) layers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_dim_swa: Option<usize>,
     /// Number of KV heads for global attention layers. If None, all layers use num_kv_heads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub num_global_kv_heads: Option<usize>,
@@ -211,6 +214,9 @@ pub struct VindexModelConfig {
     /// Gemma 4: 6 (layers 5, 11, 17, ... are full).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sliding_window_pattern: Option<usize>,
+    /// Explicit per-layer boolean pattern (Gemma 4: true = sliding, false = global).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sliding_window_pattern_bool: Option<Vec<bool>>,
     /// Explicit per-layer type array (e.g., ["sliding_attention", "full_attention", ...]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layer_types: Option<Vec<String>>,

@@ -142,6 +142,13 @@ pub fn rms_norm_heads_eps(
                 sq_sum += v * v;
             }
             let rms = (sq_sum / head_dim as f64 + eps).sqrt() as f32;
+            if head_dim > weight.len() {
+                panic!(
+                    "Architecture mismatch: head_dim is {} but norm weight has length {}. \
+                     (Layer expects larger per-head norm than provided weights)",
+                    head_dim, weight.len()
+                );
+            }
             for d in 0..head_dim {
                 out[[s, off + d]] = x[[s, off + d]] / rms * (offset + weight[d]);
             }

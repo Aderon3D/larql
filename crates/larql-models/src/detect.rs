@@ -169,7 +169,7 @@ fn parse_model_config(config: &serde_json::Value) -> ModelConfig {
     let logits_scaling = text_config["logits_scaling"].as_f64();
 
     // Per-layer attention geometry (Gemma 4 style)
-    let global_head_dim = text_config["global_head_dim"].as_u64().map(|v| v as usize);
+    let head_dim_swa = text_config["head_dim_swa"].as_u64().map(|v| v as usize);
     let num_global_kv_heads = text_config["num_global_key_value_heads"]
         .as_u64()
         .map(|v| v as usize);
@@ -183,6 +183,14 @@ fn parse_model_config(config: &serde_json::Value) -> ModelConfig {
     let sliding_window_pattern = text_config["sliding_window_pattern"]
         .as_u64()
         .map(|v| v as usize);
+    // Explicit per-layer boolean pattern (Gemma 4)
+    let sliding_window_pattern_bool = text_config.get("sliding_window_pattern_bool").and_then(|lt| {
+        lt.as_array().map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_bool())
+                .collect()
+        })
+    });
     // Explicit per-layer type array (Gemma 4: ["sliding_attention", "full_attention", ...])
     let layer_types = text_config.get("layer_types").and_then(|lt| {
         lt.as_array().map(|arr| {
@@ -203,6 +211,8 @@ fn parse_model_config(config: &serde_json::Value) -> ModelConfig {
         .as_u64()
         .map(|v| v as usize)
         .filter(|&v| v > 0);
+    
+    let global_head_dim = if head_dim_swa.is_some() { Some(head_dim) } else { None };
 
     ModelConfig {
         model_type,
@@ -210,6 +220,7 @@ fn parse_model_config(config: &serde_json::Value) -> ModelConfig {
         hidden_size,
         intermediate_size,
         head_dim,
+        head_dim_swa,
         num_q_heads,
         num_kv_heads,
         vocab_size,
@@ -233,6 +244,7 @@ fn parse_model_config(config: &serde_json::Value) -> ModelConfig {
         num_global_kv_heads,
         partial_rotary_factor,
         sliding_window_pattern,
+        sliding_window_pattern_bool,
         layer_types,
         attention_k_eq_v,
         per_layer_embed_dim,

@@ -29,10 +29,16 @@ impl Gemma4Arch {
     pub fn from_config(config: ModelConfig) -> Self {
         let num_layers = config.num_layers;
 
-        // Determine global layers from explicit layer_types or pattern
+        // Determine global layers from explicit layer_types, bool pattern, or count pattern
         let global_layers: Vec<bool> = if let Some(ref types) = config.layer_types {
             types.iter()
                 .map(|t| t == "full_attention")
+                .collect()
+        } else if let Some(ref pattern_bool) = config.sliding_window_pattern_bool {
+            // GGUF pattern: true = sliding, false = global.
+            // Our global_layers: true = global, false = sliding.
+            pattern_bool.iter()
+                .map(|&s| !s)
                 .collect()
         } else {
             let pattern = config.sliding_window_pattern.unwrap_or(6);
@@ -102,9 +108,11 @@ impl ModelArchitecture for Gemma4Arch {
 
     fn head_dim_for_layer(&self, layer: usize) -> usize {
         if self.is_global_layer(layer) {
+            // Global layers use global_head_dim (512 in E4B)
             self.config.global_head_dim.unwrap_or(self.config.head_dim)
         } else {
-            self.config.head_dim
+            // Sliding layers use head_dim_swa (256 in E4B)
+            self.config.head_dim_swa.unwrap_or(self.config.head_dim)
         }
     }
 
@@ -203,5 +211,70 @@ impl ModelArchitecture for Gemma4Arch {
         } else {
             self.config.rope_base
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ModelConfig;
+
+    #[test]
+    fn test_gemma4_geometry() {
+        let mut config = ModelConfig {
+            model_type: "gemma4".to_string(),
+            num_layers: 12,
+            hidden_size: 2560,
+            intermediate_size: 8192,
+            head_dim: 512,
+            head_dim_swa: Some(256),
+            num_q_heads: 8,
+            num_kv_heads: 2,
+            vocab_size: None,
+            rope_base: 10000.0,
+            rope_local_base: Some(10000.0),
+            sliding_window: Some(512),
+            num_experts: None,
+            num_experts_per_token: None,
+            num_shared_experts: None,
+            kv_lora_rank: None,
+            q_lora_rank: None,
+            rope_scaling: None,
+            attn_logit_softcapping: None,
+            final_logit_softcapping: None,
+            query_pre_attn_scalar: None,
+            embedding_multiplier: None,
+            residual_multiplier: None,
+            attention_multiplier: None,
+            logits_scaling: None,
+            global_head_dim: Some(512),
+            num_global_kv_heads: None,
+            partial_rotary_factor: Some(0.25),
+            sliding_window_pattern: None,
+            sliding_window_pattern_bool: Some(vec![
+                true, true, true, true, true, false, // 0-5
+                true, true, true, true, true, false, // 6-11
+            ]),
+            layer_types: None,
+            attention_k_eq_v: false,
+            per_layer_embed_dim: None,
+            num_kv_shared_layers: None,
+        };
+
+        let arch = Gemma4Arch::from_config(config.clone());
+
+        // Layer 0: Sliding
+        assert!(arch.is_sliding_window_layer(0));
+        assert_eq!(arch.head_dim_for_layer(0), 256);
+        assert_eq!(arch.rotary_fraction_for_layer(0), 1.0);
+
+        // Layer 5: Global
+        assert!(!arch.is_sliding_window_layer(5));
+        assert_eq!(arch.head_dim_for_layer(5), 512);
+        assert_eq!(arch.rotary_fraction_for_layer(5), 0.25);
+
+        // Layer 6: Sliding
+        assert!(arch.is_sliding_window_layer(6));
+        assert_eq!(arch.head_dim_for_layer(6), 256);
     }
 }

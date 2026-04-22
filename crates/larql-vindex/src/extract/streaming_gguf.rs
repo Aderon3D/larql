@@ -26,6 +26,7 @@ pub fn build_vindex_streaming_gguf(
     down_top_k: usize,
     extract_level: crate::ExtractLevel,
     dtype: StorageDtype,
+    layer_range: Option<std::ops::Range<usize>>,
     callbacks: &mut dyn IndexBuildCallbacks,
 ) -> Result<(), VindexError> {
     std::fs::create_dir_all(output_dir)?;
@@ -66,6 +67,13 @@ pub fn build_vindex_streaming_gguf(
 
     // ── 1. Gate vectors (streaming) ──
     for layer in 0..num_layers {
+        if let Some(range) = &layer_range {
+            if !range.contains(&layer) {
+                // Skip if not in range, but we need to maintain offset/info structure?
+                // Actually, for a partial index, we only store the metadata/vectors for the requested layers.
+                continue;
+            }
+        }
         callbacks.on_layer_start("gate", layer, num_layers);
         let start = std::time::Instant::now();
 
@@ -115,6 +123,11 @@ pub fn build_vindex_streaming_gguf(
     let mut all_down_meta: Vec<Option<Vec<Option<crate::FeatureMeta>>>> = vec![None; num_layers];
 
     for (layer, layer_down_meta) in all_down_meta.iter_mut().enumerate().take(num_layers) {
+        if let Some(range) = &layer_range {
+            if !range.contains(&layer) {
+                continue;
+            }
+        }
         callbacks.on_layer_start("down", layer, num_layers);
         let start = std::time::Instant::now();
 
@@ -131,9 +144,13 @@ pub fn build_vindex_streaming_gguf(
                 let w_chunk = w_down.slice(ndarray::s![.., batch_start..batch_end]).to_owned();
                 let cpu = larql_compute::CpuBackend;
                 use larql_compute::ComputeBackend;
+                
+                // Matmul is the bottleneck. 
                 let chunk_logits = cpu.matmul(embed.view(), w_chunk.view());
 
-                for feat in batch_start..batch_end {
+                // Use Rayon to parallelize the top-k token resolution for each feature in the batch
+                use rayon::prelude::*;
+                let batch_results: Vec<(usize, Option<crate::FeatureMeta>)> = (batch_start..batch_end).into_par_iter().map(|feat| {
                     let col = chunk_logits.column(feat - batch_start);
                     let mut scores: Vec<(usize, f32)> = col.iter().copied().enumerate().collect();
                     let k = down_top_k.min(scores.len());
@@ -145,6 +162,7 @@ pub fn build_vindex_streaming_gguf(
 
                     let top_k_entries: Vec<larql_models::TopKEntry> = scores.into_iter()
                         .filter_map(|(idx, logit)| {
+                            // Tokenizer is typically thread-safe
                             tokenizer.decode(&[idx as u32], true).ok()
                                 .map(|s| s.trim().to_string())
                                 .filter(|s| !s.is_empty())
@@ -158,14 +176,18 @@ pub fn build_vindex_streaming_gguf(
                         (String::new(), 0, 0.0)
                     };
 
-                    if layer_down_meta.is_none() {
-                        *layer_down_meta = Some(Vec::new());
-                    }
-                    if let Some(ref mut metas) = layer_down_meta {
-                        while metas.len() <= feat { metas.push(None); }
-                        metas[feat] = Some(crate::FeatureMeta {
-                            top_token, top_token_id, c_score, top_k: top_k_entries,
-                        });
+                    (feat, Some(crate::FeatureMeta {
+                        top_token, top_token_id, c_score, top_k: top_k_entries,
+                    }))
+                }).collect();
+
+                // Merge into layer_down_meta
+                if layer_down_meta.is_none() {
+                    *layer_down_meta = Some(vec![None; num_features]);
+                }
+                if let Some(ref mut metas) = layer_down_meta {
+                    for (feat, meta) in batch_results {
+                        metas[feat] = meta;
                     }
                 }
             }
@@ -209,6 +231,7 @@ pub fn build_vindex_streaming_gguf(
         model_config: Some(VindexModelConfig {
             model_type: cfg.model_type.clone(),
             head_dim: cfg.head_dim,
+            head_dim_swa: cfg.head_dim_swa,
             num_q_heads: cfg.num_q_heads,
             num_kv_heads: cfg.num_kv_heads,
             rope_base: cfg.rope_base,
@@ -225,6 +248,7 @@ pub fn build_vindex_streaming_gguf(
             num_global_kv_heads: cfg.num_global_kv_heads,
             partial_rotary_factor: cfg.partial_rotary_factor,
             sliding_window_pattern: cfg.sliding_window_pattern,
+            sliding_window_pattern_bool: cfg.sliding_window_pattern_bool.clone(),
             layer_types: cfg.layer_types.clone(),
             attention_k_eq_v: cfg.attention_k_eq_v,
             num_kv_shared_layers: cfg.num_kv_shared_layers,
