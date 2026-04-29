@@ -782,6 +782,7 @@ impl GateIndex for PatchedVindex {
 
     fn has_overrides_at(&self, layer: usize) -> bool {
         self.overrides_gate.keys().any(|(l, _)| *l == layer)
+            || self.deleted.iter().any(|(l, _)| *l == layer)
             || self.base.has_overrides_at(layer)
     }
 

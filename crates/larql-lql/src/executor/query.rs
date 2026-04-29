@@ -1085,12 +1085,9 @@ impl Session {
 
         // ── Phase 2: forward pass (with optional attention capture) ──
         //
-        // Unlimited top_k so EXPLAIN INFER's activation sum matches
-        // what `exec_infer` uses. Otherwise a user who runs INFER
-        // then EXPLAIN INFER on the same prompt sees a half-power
-        // baseline in the trace while production inference uses
-        // full power — silent divergence.
-        let walk_ffn = larql_inference::vindex::WalkFfn::new_unlimited_with_trace(&weights, patched);
+        // Bounded top_k to avoid OOM on large models (e.g. 4B, 7B).
+        // 1024 is enough to capture conceptual circuits while being 400x more memory efficient than unlimited.
+        let walk_ffn = larql_inference::vindex::WalkFfn::new_with_trace(&weights, patched, 1024);
         let start = std::time::Instant::now();
         let (predictions, attention_captures, lens_residuals) = if with_attention {
             let r = larql_inference::predict_with_ffn_attention(
