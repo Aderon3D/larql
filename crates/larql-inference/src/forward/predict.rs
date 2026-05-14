@@ -63,9 +63,9 @@ pub(super) fn logits_to_predictions(
 
     let mut indexed: Vec<(usize, f32)> = probs.iter().copied().enumerate().collect();
     let k = top_k.min(indexed.len());
-    indexed.select_nth_unstable_by(k, |a, b| b.1.partial_cmp(&a.1).unwrap());
+    indexed.select_nth_unstable_by(k, |a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     indexed.truncate(k);
-    indexed.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    indexed.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     let predictions = indexed
         .into_iter()
@@ -166,13 +166,22 @@ pub fn predict_with_ffn_attention(
     let mut attention = Vec::with_capacity(num_layers);
     let mut residuals = Vec::with_capacity(num_layers);
 
+    let mut kv_cache: std::collections::HashMap<usize, SharedKV> =
+        std::collections::HashMap::new();
+
     for layer in 0..num_layers {
-        match run_layer_with_capture(weights, &h, layer, ffn, false, true, ple_inputs.get(layer), None) {
-            Some((h_new, _, attn_weights, _)) => {
+        let shared_kv = weights.arch.kv_shared_source_layer(layer)
+            .and_then(|src| kv_cache.get(&src));
+
+        match run_layer_with_capture(weights, &h, layer, ffn, false, true, ple_inputs.get(layer), shared_kv) {
+            Some((h_new, _, attn_weights, kv_out)) => {
                 h = h_new;
                 residuals.push((layer, h.row(seq_len - 1).to_vec()));
                 if let Some(w) = attn_weights {
                     attention.push(LayerAttentionCapture { layer, weights: w });
+                }
+                if let Some(kv) = kv_out {
+                    kv_cache.insert(layer, kv);
                 }
             }
             None => continue,
@@ -214,12 +223,23 @@ pub fn predict_with_ffn_trace(
     let ple_inputs = precompute_per_layer_inputs(weights, &h, token_ids);
     let mut residuals = Vec::with_capacity(num_layers);
 
+    let mut kv_cache: std::collections::HashMap<usize, SharedKV> =
+        std::collections::HashMap::new();
+
     for layer in 0..num_layers {
         let last_pos = h.shape()[0] - 1;
         residuals.push(h.row(last_pos).to_vec());
 
-        h = match run_layer_with_ffn(weights, &h, layer, ffn, false, ple_inputs.get(layer), None) {
-            Some((h_new, _, _)) => h_new,
+        let shared_kv = weights.arch.kv_shared_source_layer(layer)
+            .and_then(|src| kv_cache.get(&src));
+
+        h = match run_layer_with_ffn(weights, &h, layer, ffn, false, ple_inputs.get(layer), shared_kv) {
+            Some((h_new, _, kv_out)) => {
+                if let Some(kv) = kv_out {
+                    kv_cache.insert(layer, kv);
+                }
+                h_new
+            }
             None => continue,
         };
     }

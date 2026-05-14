@@ -87,7 +87,14 @@ fn run_attention_block_core(
     let qk_offset = weights.arch.qk_norm_weight_offset();
     let qk_norm_off = if qk_offset != 0.0 { qk_offset } else { norm_offset };
     let q_normed = match arch.attn_q_norm_key(layer).and_then(|k| weights.vectors.get(&k)) {
-        Some(norm_w) => rms_norm_heads(&q_full, norm_w, num_q, head_dim, qk_norm_off),
+        Some(norm_w) => {
+            if norm_w.len() != head_dim {
+                eprintln!("[AUDIT] Layer {} Q-norm: head_dim={} but norm_w.len()={} — MISMATCH", layer, head_dim, norm_w.len());
+            } else {
+                eprintln!("[AUDIT] Layer {} Q-norm: head_dim={} norm_w.len()={} OK", layer, head_dim, norm_w.len());
+            }
+            rms_norm_heads(&q_full, norm_w, num_q, head_dim, qk_norm_off)
+        }
         None => q_full,
     };
 
@@ -119,7 +126,12 @@ fn run_attention_block_core(
         }
 
         let k_normed = match arch.attn_k_norm_key(layer).and_then(|k| weights.vectors.get(&k)) {
-            Some(norm_w) => rms_norm_heads(&k_full, norm_w, num_kv, head_dim, qk_norm_off),
+            Some(norm_w) => {
+                if norm_w.len() != head_dim {
+                    eprintln!("[AUDIT] Layer {} K-norm: head_dim={} but norm_w.len()={} — MISMATCH", layer, head_dim, norm_w.len());
+                }
+                rms_norm_heads(&k_full, norm_w, num_kv, head_dim, qk_norm_off)
+            }
             None => k_full,
         };
 

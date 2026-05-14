@@ -15,10 +15,20 @@ pub fn embed_tokens_pub(weights: &ModelWeights, token_ids: &[u32]) -> Array2<f32
     let scale = weights.arch.embed_scale();
 
     let mut h = Array2::<f32>::zeros((seq_len, hidden));
-    for (i, &tok_id) in token_ids.iter().enumerate() {
-        let row = weights.embed.row(tok_id as usize);
-        for j in 0..hidden {
-            h[[i, j]] = row[j] * scale;
+    
+    if let Some(lazy) = &weights.lazy_embed {
+        for (i, &tok_id) in token_ids.iter().enumerate() {
+            let floats = lazy.dequantize_row(tok_id as usize).expect("Embedding dequantization failed");
+            for j in 0..hidden {
+                h[[i, j]] = floats[j] * scale;
+            }
+        }
+    } else {
+        for (i, &tok_id) in token_ids.iter().enumerate() {
+            let row = weights.embed.row(tok_id as usize);
+            for j in 0..hidden {
+                h[[i, j]] = row[j] * scale;
+            }
         }
     }
     h

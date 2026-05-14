@@ -186,25 +186,21 @@ impl Session {
         out.push("-".repeat(48));
 
         for layer in &show_layers {
-            let gate_count = patched
-                .gate_vectors_at(*layer)
-                .map(|m| m.shape()[0])
-                .unwrap_or(0);
-            let (meta_count, top_tok) = if let Some(metas) = patched.down_meta_at(*layer) {
-                let count = metas.iter().filter(|m| m.is_some()).count();
-                let mut freq: HashMap<&str, usize> = HashMap::new();
-                for m in metas.iter().flatten() {
-                    *freq.entry(&m.top_token).or_default() += 1;
+            let gate_count = patched.num_features(*layer);
+            let mut meta_count = 0;
+            let mut freq: HashMap<String, usize> = HashMap::new();
+            for feat in 0..gate_count {
+                if let Some(meta) = patched.feature_meta(*layer, feat) {
+                    meta_count += 1;
+                    *freq.entry(meta.top_token).or_default() += 1;
                 }
-                let top = freq
-                    .into_iter()
-                    .max_by_key(|(_, c)| *c)
-                    .map(|(t, _)| t.to_string())
-                    .unwrap_or_default();
-                (count, top)
-            } else {
-                (0, String::new())
-            };
+            }
+            let top_tok = freq
+                .into_iter()
+                .max_by_key(|(_, c)| *c)
+                .map(|(t, _)| t)
+                .unwrap_or_default();
+
 
             out.push(format!(
                 "L{:<7} {:>10} {:>10} {:>15}",

@@ -154,6 +154,7 @@ pub fn load_model_dir(path: impl AsRef<Path>) -> Result<ModelWeights, ModelError
         tensors,
         vectors,
         embed,
+        lazy_embed: None,
         lm_head,
         num_layers: cfg.num_layers,
         hidden_size: cfg.hidden_size,

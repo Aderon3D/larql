@@ -102,6 +102,7 @@ pub struct GgufTensorInfo {
 enum TensorData {
     Array(Array2<f32>),
     Vector(Vec<f32>),
+    Raw(Vec<u8>, u32), // raw bytes + tensor_type
 }
 
 pub struct GgufFile {
@@ -139,7 +140,7 @@ impl GgufFile {
         for _ in 0..n_metadata {
             let key = read_string(&mut r)?;
             let value = read_value(&mut r)?;
-            if key.contains("attention") || key.contains("head") || key.contains("hidden") {
+            if key.contains("attention") || key.contains("head") || key.contains("hidden") || key.contains("vocab") {
                 eprintln!("DEBUG GGUF KV: {} = {:?}", key, value);
             }
             metadata.insert(key, value);
@@ -175,16 +176,19 @@ impl GgufFile {
         })
     }
 
-    /// Load all tensors, dequantizing to f32.
+    /// Load all tensors, dequantizing to f32. Optionally skip heavy FFN weights to save RAM.
     #[allow(clippy::type_complexity)]
-    pub fn load_tensors(&self) -> Result<(HashMap<String, crate::WeightArray>, HashMap<String, Vec<f32>>), ModelError> {
+    pub fn load_tensors(&self, skip_ffn: bool) -> Result<(HashMap<String, crate::WeightArray>, HashMap<String, Vec<f32>>, HashMap<String, (Vec<u8>, u32)>), ModelError> {
         use rayon::prelude::*;
         
         let file = std::fs::File::open(&self.path)?;
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
 
-        // Dequantize in parallel
-        let results: Vec<Result<Option<(String, TensorData)>, ModelError>> = self.tensor_infos.par_iter().map(|info| {
+        // Limit parallelism to avoid OOM when multiple large tensors (e.g. 2.5GB embed)
+        // are dequantized simultaneously. 2 threads keeps peak memory manageable.
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        let results: Vec<Result<Option<(String, TensorData)>, ModelError>> = pool.install(|| {
+            self.tensor_infos.par_iter().map(|info| {
             let abs_offset = self.data_offset + info.offset;
             let n_elements: u64 = info.dims.iter().product();
 
@@ -197,10 +201,20 @@ impl GgufFile {
             }
 
             let raw = &mmap[abs_offset as usize..abs_offset as usize + data_size];
-            let floats = dequantize(raw, info.tensor_type, n_elements as usize)?;
-
             // Normalize key name (strip GGUF prefixes)
             let key = normalize_gguf_key(&info.name);
+            
+            if skip_ffn && (key.contains("proj") || key.contains("ffn") || key.contains("mlp")) {
+                return Ok(None);
+            }
+
+            // Lazy Embedding Table: Skip dequantization and transposition during load.
+            // This prevents a 2.5GB -> 5GB RAM spike.
+            if key == "embed_tokens.weight" || key == "token_embd.weight" {
+                return Ok(Some((key, TensorData::Raw(raw.to_vec(), info.tensor_type))));
+            }
+
+            let floats = dequantize(raw, info.tensor_type, n_elements as usize)?;
             
             match info.n_dims {
                 2 => {
@@ -215,21 +229,24 @@ impl GgufFile {
                 }
                 _ => Ok(None) // skip higher-dim tensors
             }
-        }).collect();
+        }).collect()
+        });
 
         let mut tensors = HashMap::new();
         let mut vectors = HashMap::new();
+        let mut raw_tensors: HashMap<String, (Vec<u8>, u32)> = HashMap::new();
 
         for res in results {
             if let Some((key, data)) = res? {
                 match data {
                     TensorData::Array(arr) => { tensors.insert(key, arr.into_shared()); }
                     TensorData::Vector(v) => { vectors.insert(key, v); }
+                    TensorData::Raw(bytes, t) => { raw_tensors.insert(key, (bytes, t)); }
                 }
             }
         }
 
-        Ok((tensors, vectors))
+        Ok((tensors, vectors, raw_tensors))
     }
 
     /// Build a config.json-equivalent from GGUF metadata for architecture detection.
@@ -303,13 +320,20 @@ impl GgufFile {
             "head_dim_swa": if head_dim_swa > 0 { Some(head_dim_swa) } else { None },
             "sliding_window_pattern_bool": sliding_window_pattern_bool,
             "rope_theta": get_arch_f64("rope.freq_base"),
-            "vocab_size": get_arch_u32("vocab_size"),
+            "vocab_size": if get_arch_u32("vocab_size") > 0 { get_arch_u32("vocab_size") } else { _get_u32("general.vocab_size") },
+            "hidden_size_per_layer_input": if get_arch_u32("embedding_length_per_layer_input") > 0 { Some(get_arch_u32("embedding_length_per_layer_input")) } else { None },
+            "final_logit_softcapping": if get_arch_f64("final_logit_softcapping") > 0.0 { Some(get_arch_f64("final_logit_softcapping")) } else { Some(30.0) }, // Default to 30.0 for Gemma models
         })
     }
 }
 
 /// Load a GGUF file into ModelWeights (dequantized to f32).
 pub fn load_gguf(path: &Path) -> Result<ModelWeights, ModelError> {
+    load_gguf_selective(path, false)
+}
+
+/// Load a GGUF file with optional FFN skip to save memory.
+pub fn load_gguf_selective(path: &Path, skip_ffn: bool) -> Result<ModelWeights, ModelError> {
     let gguf = GgufFile::open(path)?;
 
     // Detect architecture from GGUF metadata
@@ -317,8 +341,8 @@ pub fn load_gguf(path: &Path) -> Result<ModelWeights, ModelError> {
     let arch = crate::detect_from_json(&config_json);
     let prefixes = arch.key_prefixes_to_strip();
 
-    // Load and dequantize all tensors
-    let (mut tensors, vectors) = gguf.load_tensors()?;
+    // Load and dequantize tensors
+    let (mut tensors, vectors, raw_tensors) = gguf.load_tensors(skip_ffn)?;
 
     // Re-normalize keys through the architecture's prefix stripping
     let mut normalized_tensors: HashMap<String, crate::WeightArray> = HashMap::new();
@@ -328,24 +352,52 @@ pub fn load_gguf(path: &Path) -> Result<ModelWeights, ModelError> {
     }
 
     let embed_key = arch.embed_key();
-    let embed_raw = normalized_tensors
-        .get(embed_key)
-        .ok_or_else(|| ModelError::MissingTensor(embed_key.into()))?
-        .clone();
-    // GGUF stores embeddings as [hidden_size, vocab_size] but we need [vocab_size, hidden_size]
-    let embed = if embed_raw.shape()[0] < embed_raw.shape()[1] {
-        let mut out = ndarray::Array2::<f32>::zeros((embed_raw.shape()[1], embed_raw.shape()[0]));
-        out.assign(&embed_raw.t());
-        out.into_shared()
-    } else {
-        embed_raw
-    };
+    let mut lazy_embed = None;
+    let embed;
 
-    let lm_head = normalized_tensors
-        .get("lm_head.weight")
-        .or_else(|| normalized_tensors.get("output.weight"))
-        .cloned()
-        .unwrap_or_else(|| embed.clone());
+    if let Some((raw_bytes, tensor_type)) = raw_tensors.get(embed_key).or_else(|| raw_tensors.get("token_embd.weight")) {
+        let cfg = arch.config();
+        lazy_embed = Some(crate::weights::LazyEmbedding {
+            raw_data: raw_bytes.clone(),
+            tensor_type: *tensor_type,
+            vocab_size: cfg.vocab_size.filter(|&v| v > 0).unwrap_or(262144),
+            hidden_size: cfg.hidden_size,
+        });
+        // Create an empty dummy array for `embed` to satisfy the struct field
+        embed = ndarray::Array2::<f32>::zeros((0, 0)).into_shared();
+    } else {
+        let embed_raw = normalized_tensors
+            .get(embed_key)
+            .ok_or_else(|| ModelError::MissingTensor(embed_key.into()))?
+            .clone();
+        // GGUF stores embeddings as [hidden_size, vocab_size] but we need [vocab_size, hidden_size]
+        if embed_raw.shape()[0] < embed_raw.shape()[1] {
+            let mut out = ndarray::Array2::<f32>::zeros((embed_raw.shape()[1], embed_raw.shape()[0]));
+            out.assign(&embed_raw.t());
+            embed = out.into_shared();
+        } else {
+            embed = embed_raw;
+        };
+    }
+
+    let lm_head = if let Some(t) = normalized_tensors.get("lm_head.weight").or_else(|| normalized_tensors.get("output.weight")) {
+        t.clone()
+    } else if let Some(ref le) = lazy_embed {
+        // Tied embeddings with lazy_embed: dequantize the table once for the head.
+        // logits_to_predictions needs a real Array2 for now.
+        let row_size = le.raw_data.len() / le.vocab_size;
+        let mut data = Vec::with_capacity(le.vocab_size * le.hidden_size);
+        for i in 0..le.vocab_size {
+            let start = i * row_size;
+            let row = &le.raw_data[start..start + row_size];
+            data.extend(dequantize(row, le.tensor_type, le.hidden_size).map_err(|e| ModelError::Parse(e.to_string()))?);
+        }
+        ndarray::Array2::from_shape_vec((le.vocab_size, le.hidden_size), data)
+            .map_err(|e| ModelError::Parse(e.to_string()))?
+            .into_shared()
+    } else {
+        embed.clone()
+    };
 
     let cfg = arch.config();
     // Gemma3 GGUF does not store vocab_size in arch metadata.
@@ -371,6 +423,7 @@ pub fn load_gguf(path: &Path) -> Result<ModelWeights, ModelError> {
         tensors: normalized_tensors,
         vectors,
         embed,
+        lazy_embed,
         lm_head,
         num_layers: cfg.num_layers,
         hidden_size: cfg.hidden_size,
@@ -501,7 +554,7 @@ fn tensor_data_size(tensor_type: u32, n_elements: usize) -> Result<usize, ModelE
     crate::quant::ggml::tensor_data_size(tensor_type, n_elements)
 }
 
-fn dequantize(data: &[u8], tensor_type: u32, n_elements: usize) -> Result<Vec<f32>, ModelError> {
+pub fn dequantize(data: &[u8], tensor_type: u32, n_elements: usize) -> Result<Vec<f32>, ModelError> {
     crate::quant::ggml::dequantize(data, tensor_type, n_elements)
 }
 

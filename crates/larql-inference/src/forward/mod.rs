@@ -74,16 +74,20 @@ pub fn apply_norm(
     weight_key: &str,
     norm_offset: f32,
 ) -> Array2<f32> {
+    let weight = weights.vectors.get(weight_key).unwrap_or_else(|| {
+        panic!("Normalization weight '{}' not found in model vectors. Check architecture key mappings.", weight_key)
+    });
+
     match weights.arch.norm_type() {
         NormType::LayerNorm => {
             let bias_key = weight_key.replace(".weight", ".bias");
             crate::residual::layer_norm(
                 x,
-                weights.vectors.get(weight_key),
+                Some(weight),
                 weights.vectors.get(&bias_key),
             )
         }
-        _ => rms_norm(x, weights.vectors.get(weight_key), norm_offset),
+        _ => rms_norm(x, Some(weight), norm_offset),
     }
 }
 

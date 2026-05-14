@@ -23,17 +23,26 @@ pub struct WalkFfn<'a> {
     pub index: &'a dyn GateIndex,
     pub top_k: usize,
     pub backend: Option<&'a dyn ComputeBackend>,
-    trace_residuals: std::cell::RefCell<Vec<(usize, Vec<f32>)>>,
+    /// Captured hits and last-token residuals per layer.
+    /// Hits are O(top_k) per layer. Residuals are O(hidden) per layer.
+    /// Total memory: O(L * (K + H)), where L=layers, K=top_k, H=hidden.
+    /// For 4B model: 42 * (5 + 2560) * 4 bytes is negligible (~0.4 MB).
+    trace_data: std::cell::RefCell<Vec<TraceEntry>>,
     record_trace: bool,
+}
+
+pub struct TraceEntry {
+    pub layer: usize,
+    pub residual: Vec<f32>,
+    pub hits: Vec<WalkHit>,
 }
 
 impl<'a> WalkFfn<'a> {
     /// Create a WalkFfn with unlimited K (uses all features above activation threshold).
-    /// The gate KNN returns all features; sparsity comes from the activation threshold.
     pub fn new(weights: &'a ModelWeights, index: &'a dyn GateIndex, top_k: usize) -> Self {
         Self {
             weights, index, top_k, backend: None,
-            trace_residuals: std::cell::RefCell::new(Vec::new()),
+            trace_data: std::cell::RefCell::new(Vec::new()),
             record_trace: false,
         }
     }
@@ -51,7 +60,7 @@ impl<'a> WalkFfn<'a> {
     ) -> Self {
         Self {
             weights, index, top_k, backend: Some(backend),
-            trace_residuals: std::cell::RefCell::new(Vec::new()),
+            trace_data: std::cell::RefCell::new(Vec::new()),
             record_trace: false,
         }
     }
@@ -68,22 +77,12 @@ impl<'a> WalkFfn<'a> {
     pub fn new_with_trace(weights: &'a ModelWeights, index: &'a dyn GateIndex, top_k: usize) -> Self {
         Self {
             weights, index, top_k, backend: None,
-            trace_residuals: std::cell::RefCell::new(Vec::new()),
+            trace_data: std::cell::RefCell::new(Vec::new()),
             record_trace: true,
         }
     }
 
-    /// Unlimited top_k plus residual tracing. Used by `exec_infer`
-    /// whenever a patched session has installed slots — bounded
-    /// top_k drops features from the activation sum, which is
-    /// harmless on a clean model (dropped features have tiny
-    /// activations) but catastrophic once a strong (×30 gate scale)
-    /// INSERT slot is in the mix: the slot's activation then
-    /// dominates a half-weakened baseline and hijacks every prompt
-    /// to whichever installed target has the largest lm_head
-    /// alignment. Matching the dense FFN by processing every
-    /// feature keeps the baseline intact and the installed slot
-    /// proportional.
+    /// Unlimited top_k plus residual tracing.
     pub fn new_unlimited_with_trace(
         weights: &'a ModelWeights,
         index: &'a dyn GateIndex,
@@ -91,28 +90,63 @@ impl<'a> WalkFfn<'a> {
         Self::new_with_trace(weights, index, usize::MAX)
     }
 
+    pub fn take_data(&self) -> Vec<TraceEntry> {
+        self.trace_data.borrow_mut().drain(..).collect()
+    }
+
     /// Take raw per-layer residuals (the exact vectors gate_knn sees during inference).
-    /// These are the normalized post-attention hidden states at the last token position.
     pub fn take_residuals(&self) -> Vec<(usize, Vec<f32>)> {
-        self.trace_residuals.borrow_mut().drain(..).collect()
+        self.trace_data.borrow_mut().drain(..).map(|e| (e.layer, e.residual)).collect()
     }
 
     pub fn take_trace(&self) -> WalkTrace {
-        let residuals = self.trace_residuals.borrow_mut().drain(..).collect::<Vec<_>>();
-        let mut layers = Vec::with_capacity(residuals.len());
-        for (layer, residual) in residuals {
-            let r = ndarray::Array1::from_vec(residual);
-            let hits = self.index.gate_knn(layer, &r, self.top_k);
-            let walk_hits: Vec<WalkHit> = hits
-                .into_iter()
-                .filter_map(|(feature, gate_score)| {
-                    let meta = self.index.feature_meta(layer, feature)?.clone();
-                    Some(WalkHit { layer, feature, gate_score, meta })
-                })
-                .collect();
-            layers.push((layer, walk_hits));
-        }
+        let entries = self.trace_data.borrow_mut().drain(..).collect::<Vec<_>>();
+        let layers = entries.into_iter()
+            .map(|e| (e.layer, e.hits))
+            .collect();
         WalkTrace { layers }
+    }
+
+    fn record_hits(&self, layer: usize, residual: &ndarray::ArrayView1<f32>) {
+        if !self.record_trace { return; }
+        
+        // Capture hits for the last token only.
+        let hits = self.index.gate_knn(layer, &residual.to_owned(), self.top_k);
+        let walk_hits: Vec<WalkHit> = hits
+            .into_iter()
+            .filter_map(|(feature, gate_score)| {
+                let meta = self.index.feature_meta(layer, feature)?.clone();
+                Some(WalkHit { layer, feature, gate_score, meta })
+            })
+            .collect();
+
+        self.trace_data.borrow_mut().push(TraceEntry {
+            layer,
+            residual: residual.to_vec(),
+            hits: walk_hits,
+        });
+    }
+
+    fn record_hits_from_activation(&self, layer: usize, residual: &ndarray::ArrayView1<f32>, activation: &ndarray::ArrayView1<f32>) {
+        if !self.record_trace { return; }
+        
+        let mut indexed: Vec<(usize, f32)> = activation.iter().copied().enumerate().collect();
+        indexed.sort_unstable_by(|a, b| b.1.abs().partial_cmp(&a.1.abs()).unwrap());
+        indexed.truncate(self.top_k);
+        
+        let walk_hits: Vec<WalkHit> = indexed
+            .into_iter()
+            .filter_map(|(feature, gate_score)| {
+                let meta = self.index.feature_meta(layer, feature)?.clone();
+                Some(WalkHit { layer, feature, gate_score, meta })
+            })
+            .collect();
+
+        self.trace_data.borrow_mut().push(TraceEntry {
+            layer,
+            residual: residual.to_vec(),
+            hits: walk_hits,
+        });
     }
 
     /// Sparse walk FFN: zero matrix multiplications.
@@ -553,141 +587,76 @@ impl<'a> FfnBackend for WalkFfn<'a> {
         layer: usize,
         x: &Array2<f32>,
     ) -> (Array2<f32>, Array2<f32>) {
-        let num_features = self.index.num_features(layer);
-        if num_features == 0 {
-            let dense_ffn = crate::ffn::WeightFfn { weights: self.weights };
-            return dense_ffn.forward_with_activation(layer, x);
-        }
-
-        // Record for deferred trace
-        if self.record_trace {
-            let seq_len = x.shape()[0];
-            let last_row = x.row(seq_len - 1).to_vec();
-            self.trace_residuals.borrow_mut().push((layer, last_row));
-        }
-
-        // Override-aware routing: when this layer has any patched
-        // gate / up / down vectors (i.e. INSERT has touched it), force
-        // the per-feature `walk_ffn_sparse` path. That path checks all
-        // three override slots before falling back to the mmap'd row;
-        // the BLAS / interleaved paths below operate on whole-layer
-        // matrices and only have a partial post-hoc down-override
-        // correction, which silently produces wrong activations for
-        // overridden features. The sparse path is correct by
-        // construction and the only path that respects up_override,
-        // so anything with overrides goes here.
-        if self.index.has_overrides_at(layer) {
-            if let Some(result) = self.walk_ffn_sparse(layer, x) {
-                return result;
-            }
-        }
-
-        // Q4 interleaved: preferred when GPU Q4 is available (Metal shader faster than BLAS).
-        // CPU Q4 C kernel is slower than CPU BLAS at these dimensions — only use with GPU.
-        if self.index.has_interleaved_q4() && self.backend.is_some_and(|be| be.has_q4()) {
-            if let Some(result) = self.walk_ffn_q4_interleaved(layer, x) {
-                return result;
-            }
-        }
-
-        // f32 interleaved: gate+up+down contiguous per layer.
-        if self.index.has_interleaved() {
-            if let Some(result) = self.walk_ffn_interleaved(layer, x) {
-                return result;
-            }
-        }
-
-        // Full mmap walk: gate + up + down from 3 separate mmap files.
-        // At high K (>50% intermediate), uses full mmap matmuls.
-        // At low K (<50%), uses per-feature sparse walk.
-        //
-        if self.index.has_full_mmap_ffn() {
-            let intermediate = self.index.num_features(layer);
-            if intermediate > 0 && self.top_k * 2 < intermediate {
-                // Low K: per-feature sparse (no matmul, graph walk)
-                if let Some(result) = self.walk_ffn_sparse(layer, x) {
-                    return result;
-                }
+        let (out, mut activation): (Array2<f32>, Array2<f32>) = {
+            let num_features = self.index.num_features(layer);
+            if num_features == 0 {
+                let dense_ffn = crate::ffn::WeightFfn { weights: self.weights };
+                dense_ffn.forward_with_activation(layer, x)
             } else {
-                // High K: full mmap matmuls (production path)
-                if let Some(mut result) = self.walk_ffn_full_mmap(layer, x) {
-                    // Apply down overrides from INSERT as post-hoc corrections.
-                    // For each overridden feature, subtract the model's down contribution
-                    // and add the override's down contribution using the same activation.
-                    if self.index.has_overrides_at(layer) {
-                        let hidden = x.shape()[1];
-                        let seq_len = x.shape()[0];
-                        let (ref mut out, ref activation) = result;
-                        if let Some(down_view) = self.index.down_layer_matrix(layer) {
-                            for s in 0..seq_len {
-                                let mut out_row = out.row_mut(s);
-                                // Check each overridden feature
-                                for feat in 0..intermediate {
-                                    if let Some(override_down) = self.index.down_override(layer, feat) {
-                                        if override_down.len() != hidden { continue; }
-                                        let act = activation[[s, feat]];
-                                        if act.abs() <= 1e-10 { continue; }
-                                        // Subtract original down contribution
-                                        let orig_down = down_view.row(feat);
-                                        out_row.scaled_add(-act, &orig_down);
-                                        // Add override down contribution
-                                        let ov = ndarray::ArrayView1::from(override_down);
-                                        out_row.scaled_add(act, &ov);
+                if self.index.has_overrides_at(layer) {
+                    // Sparse path handles overrides correctly.
+                    self.walk_ffn_sparse(layer, x).expect("sparse walk failed")
+                } else if self.index.has_interleaved_q4() && self.backend.is_some_and(|be| be.has_q4()) {
+                    self.walk_ffn_q4_interleaved(layer, x).expect("q4 walk failed")
+                } else if self.index.has_interleaved() {
+                    self.walk_ffn_interleaved(layer, x).expect("interleaved walk failed")
+                } else if self.index.has_full_mmap_ffn() {
+                    let intermediate = self.index.num_features(layer);
+                    if intermediate > 0 && self.top_k * 2 < intermediate {
+                        self.walk_ffn_sparse(layer, x).expect("sparse walk failed")
+                    } else {
+                        let mut result = self.walk_ffn_full_mmap(layer, x).expect("mmap walk failed");
+                        // Apply down overrides from INSERT as post-hoc corrections.
+                        if self.index.has_overrides_at(layer) {
+                            let hidden = x.shape()[1];
+                            let seq_len = x.shape()[0];
+                            let (ref mut out_res, ref activation_res) = result;
+                            if let Some(down_view) = self.index.down_layer_matrix(layer) {
+                                for s in 0..seq_len {
+                                    let mut out_row = out_res.row_mut(s);
+                                    for feat in 0..intermediate {
+                                        if let Some(override_down) = self.index.down_override(layer, feat) {
+                                            if override_down.len() != hidden { continue; }
+                                            let act = activation_res[[s, feat]];
+                                            if act.abs() <= 1e-10 { continue; }
+                                            let orig_down = down_view.row(feat);
+                                            out_row.scaled_add(-act, &orig_down);
+                                            let ov = ndarray::ArrayView1::from(override_down);
+                                            out_row.scaled_add(act, &ov);
+                                        }
                                     }
                                 }
                             }
                         }
+                        result
                     }
-                    return result;
+                } else if self.index.has_down_features() {
+                    self.walk_ffn_exact(layer, x)
+                } else {
+                    let features = self.index.gate_knn_batch(layer, x, self.top_k);
+                    sparse_ffn_forward(self.weights, layer, x, &features)
                 }
             }
+        };
+
+        // Record for deferred trace
+        if self.record_trace {
+            let seq_len = x.shape()[0];
+            let residual = x.row(seq_len - 1);
+            if activation.shape()[0] > 0 {
+                let act_row = activation.row(seq_len - 1);
+                self.record_hits_from_activation(layer, &residual, &act_row);
+            } else {
+                self.record_hits(layer, &residual);
+            }
+            
+            // O(1) memory enforcement: if we are in trace mode, we explicitly
+            // drop the activation matrix as soon as we've recorded the hits.
+            // This prevents O(L) accumulation of massive activation tensors.
+            activation = Array2::zeros((0, 0));
         }
 
-        // Fallback: partial mmap (gate/up from model weights + down from mmap)
-        if self.index.has_down_features() {
-            return self.walk_ffn_exact(layer, x);
-        }
-
-        // Gate KNN needed only for sparse fallback (no mmap down).
-        // PatchedVindex::gate_knn_batch applies the gate overlay so any
-        // installed slot lands in the candidate set even when its
-        // original disk-side gate is weak.
-        let features = self.index.gate_knn_batch(layer, x, self.top_k);
-
-        // Fallback: sparse matmul against model weights.
-        //
-        // We always need gate-aware overrides on the patched session
-        // because INSERT writes the strong gate / up / down trio into
-        // the overlay. The dense gather above reads the original (weak)
-        // free-slot gate / up at the installed feature, so the activation
-        // would be tiny without the override-aware computation.
-        // sparse_ffn_forward_with_full_overrides re-computes
-        // `silu(gate_override · x) * (up_override · x)` for any slot
-        // with an overlay entry, then applies the down override.
-        let has_any_override = features.iter().any(|&f| {
-            self.index.down_override(layer, f).is_some()
-                || self.index.up_override(layer, f).is_some()
-        }) || self.index.has_overrides_at(layer);
-
-        if has_any_override {
-            let slot_overrides: Vec<crate::ffn::FeatureSlotOverride<'_>> = features
-                .iter()
-                .map(|&f| crate::ffn::FeatureSlotOverride {
-                    feature: f,
-                    // gate override lives on the patched overlay, accessed
-                    // via the new accessor on the GateIndex trait.
-                    gate: self.index.gate_override(layer, f),
-                    up: self.index.up_override(layer, f),
-                    down: self.index.down_override(layer, f),
-                })
-                .filter(|o| o.gate.is_some() || o.up.is_some() || o.down.is_some())
-                .collect();
-            crate::ffn::sparse_ffn_forward_with_full_overrides(
-                self.weights, layer, x, &features, &slot_overrides,
-            )
-        } else {
-            sparse_ffn_forward(self.weights, layer, x, &features)
-        }
+        (out, activation)
     }
 
     fn name(&self) -> &str {

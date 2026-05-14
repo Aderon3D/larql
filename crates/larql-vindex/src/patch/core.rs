@@ -794,6 +794,10 @@ impl GateIndex for PatchedVindex {
         self.base.has_down_features()
     }
 
+    fn has_up_features(&self) -> bool {
+        self.base.has_up_features()
+    }
+
     fn down_layer_matrix(&self, layer: usize) -> Option<ndarray::ArrayView2<'_, f32>> {
         self.base.down_layer_matrix(layer)
     }

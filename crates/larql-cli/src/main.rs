@@ -1,5 +1,8 @@
 use clap::{Parser, Subcommand};
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod commands;
 mod formatting;
 mod utils;

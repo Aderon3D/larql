@@ -34,7 +34,12 @@ pub fn predict_with_graph_vindex_logits(
 
     for layer in 0..weights.num_layers {
         match graph.forward_layer(weights, &h, layer) {
-            Some(output) => h = output.residual,
+            Some(output) => {
+                h = output.residual;
+                if h.iter().any(|&x| !x.is_finite()) {
+                    panic!("Non-finite value (NaN/Inf) detected in residual stream at layer {}!", layer);
+                }
+            }
             None => break,
         }
     }
@@ -89,7 +94,12 @@ pub fn predict_with_graph(
 
     for layer in 0..weights.num_layers {
         match graph.forward_layer(weights, &h, layer) {
-            Some(output) => h = output.residual,
+            Some(output) => {
+                h = output.residual;
+                if h.iter().any(|&x| !x.is_finite()) {
+                    panic!("Non-finite value (NaN/Inf) detected in residual stream at layer {}!", layer);
+                }
+            }
             None => break,
         }
     }

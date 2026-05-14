@@ -8,11 +8,34 @@ use crate::ModelArchitecture;
 /// Owned: from safetensors loading (heap). Shared: from mmap (zero-copy).
 pub type WeightArray = ArcArray2<f32>;
 
+/// Lazy embedding table — keeps quantized bytes in RAM and dequantizes per-token.
+pub struct LazyEmbedding {
+    pub raw_data: Vec<u8>,
+    pub tensor_type: u32,
+    pub vocab_size: usize,
+    pub hidden_size: usize,
+}
+
+impl LazyEmbedding {
+    pub fn dequantize_row(&self, token_id: usize) -> Result<Vec<f32>, crate::detect::ModelError> {
+        let row_size = self.raw_data.len() / self.vocab_size;
+        let start = token_id * row_size;
+        let end = start + row_size;
+        if end > self.raw_data.len() {
+            return Err(crate::detect::ModelError::Parse(format!("Token ID {} out of bounds for embedding table", token_id)));
+        }
+        let raw_row = &self.raw_data[start..end];
+        crate::loading::gguf::dequantize(raw_row, self.tensor_type, self.hidden_size)
+    }
+}
+
 /// A loaded model's weight tensors, configuration, and architecture.
 pub struct ModelWeights {
     pub tensors: HashMap<String, WeightArray>,
     pub vectors: HashMap<String, Vec<f32>>,
     pub embed: WeightArray,
+    /// Optional lazy embedding table (replaces `embed` if present).
+    pub lazy_embed: Option<LazyEmbedding>,
     /// Output projection matrix. Same as embed if tie_word_embeddings=true,
     /// separate lm_head.weight otherwise.
     pub lm_head: WeightArray,

@@ -87,6 +87,11 @@ impl VectorIndex {
         Ok(())
     }
 
+    /// Whether feature-major up vectors are loaded.
+    pub fn has_up_features(&self) -> bool {
+        self.up_features_mmap.is_some()
+    }
+
     /// Get the full up matrix for a layer: [intermediate, hidden] zero-copy view.
     pub fn up_layer_matrix(&self, layer: usize) -> Option<ndarray::ArrayView2<'_, f32>> {
         let mmap = self.up_features_mmap.as_ref()?;

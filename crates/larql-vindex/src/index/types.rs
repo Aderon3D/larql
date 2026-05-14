@@ -50,6 +50,7 @@ pub trait GateIndex {
     fn has_overrides_at(&self, _layer: usize) -> bool { false }
     fn down_feature_vector(&self, _layer: usize, _feature: usize) -> Option<&[f32]> { None }
     fn has_down_features(&self) -> bool { false }
+    fn has_up_features(&self) -> bool { false }
     fn down_layer_matrix(&self, _layer: usize) -> Option<ndarray::ArrayView2<'_, f32>> { None }
     fn gate_scores_batch(&self, _layer: usize, _x: &Array2<f32>) -> Option<Array2<f32>> { None }
     fn up_layer_matrix(&self, _layer: usize) -> Option<ndarray::ArrayView2<'_, f32>> { None }

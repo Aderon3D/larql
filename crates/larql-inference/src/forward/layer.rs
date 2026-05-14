@@ -131,8 +131,6 @@ pub(super) fn run_layer_with_ffn(
 }
 
 /// Run a single transformer layer, optionally capturing attention weights.
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::type_complexity)]
 pub(super) fn run_layer_with_capture(
     weights: &ModelWeights,
     h: &Array2<f32>,
@@ -143,10 +141,37 @@ pub(super) fn run_layer_with_capture(
     ple_input: Option<&Array2<f32>>,
     shared_kv: Option<&SharedKV>,
 ) -> Option<(Array2<f32>, Option<Array2<f32>>, Option<AttentionWeights>, Option<SharedKV>)> {
-    let (h_post_attn, attn_weights) = run_attention_inner(weights, h, layer, capture_attention, shared_kv)?;
-    let kv_out = None;
+    let (h_post_attn, attn_weights, kv_out) = if shared_kv.is_some() {
+        let (h_pa, aw) = run_attention_inner(weights, h, layer, capture_attention, shared_kv)?;
+        (h_pa, aw, None)
+    } else {
+        let (h_pa, _, aw, k, v) = crate::attention::run_attention_block_with_kv_out(
+            weights, h, layer, capture_attention, None
+        )?;
+        (h_pa, aw, Some((k, v)))
+    };
+    
+    if h_post_attn.iter().any(|&x| !x.is_finite()) {
+        panic!("NaN detected after attention at layer {}!", layer);
+    }
+    
     let (h_post_ffn, activation) = run_ffn(weights, &h_post_attn, layer, ffn, capture_activation);
+    
+    if h_post_ffn.iter().any(|&x| !x.is_finite()) {
+        panic!("NaN detected after FFN at layer {}!", layer);
+    }
+    
     let mut h_out = apply_per_layer_embedding(weights, &h_post_ffn, layer, ple_input);
+    
+    if h_out.iter().any(|&x| !x.is_finite()) {
+        panic!("NaN detected after PLE at layer {}!", layer);
+    }
+    
     apply_layer_scalar(weights, &mut h_out, layer);
+    
+    if h_out.iter().any(|&x| !x.is_finite()) {
+        panic!("NaN detected after layer_scalar at layer {}!", layer);
+    }
+    
     Some((h_out, activation, attn_weights, kv_out))
 }

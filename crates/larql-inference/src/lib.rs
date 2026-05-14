@@ -79,7 +79,7 @@ pub use layer_graph::{
     detect_template,
 };
 pub use vindex::WalkFfn;
-pub use model::{load_model_dir, resolve_model_path, ModelWeights};
+pub use model::{load_model_dir, resolve_model_path, load_gguf_selective, ModelWeights};
 pub use tokenizer::{decode_token, decode_token_raw, load_tokenizer};
 
 // Walker re-exports.

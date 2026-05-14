@@ -365,20 +365,33 @@ impl VectorIndex {
         None
     }
 
-    /// Number of features indexed at a layer.
     pub fn num_features(&self, layer: usize) -> usize {
-        // Check mmap first
+        // 1. Check mmap gates
         if self.gate_mmap_bytes.is_some() {
-            return self.gate_mmap_slices.get(layer)
-                .map(|s| s.num_features)
-                .unwrap_or(0);
+            if let Some(slice) = self.gate_mmap_slices.get(layer) {
+                if slice.num_features > 0 {
+                    return slice.num_features;
+                }
+            }
         }
-        self.gate_vectors
-            .get(layer)
-            .and_then(|v| v.as_ref())
-            .map(|m| m.shape()[0])
-            .unwrap_or(0)
+        // 2. Check heap gates
+        if let Some(Some(matrix)) = self.gate_vectors.get(layer) {
+            return matrix.shape()[0];
+        }
+        // 3. Check mmap metadata
+        if let Some(ref dm) = self.down_meta_mmap {
+            let n = dm.num_features(layer);
+            if n > 0 {
+                return n;
+            }
+        }
+        // 4. Check heap metadata
+        if let Some(Some(metas)) = self.down_meta.get(layer) {
+            return metas.len();
+        }
+        0
     }
+
 
     /// Total gate vectors loaded across all layers.
     pub fn total_gate_vectors(&self) -> usize {
@@ -731,13 +744,7 @@ impl VectorIndex {
     }
 
     /// Number of features at a layer (works in both heap and mmap mode).
-    pub fn num_features_at(&self, layer: usize) -> usize {
-        if self.gate_mmap_bytes.is_some() {
-            self.gate_mmap_slices.get(layer).map(|s| s.num_features).unwrap_or(0)
-        } else {
-            self.num_features(layer)
-        }
-    }
+
 
     /// Pre-decode f16 gate vectors to f32 for lock-free access.
     /// For f32 vindexes this is a no-op — the mmap path is already zero-copy.

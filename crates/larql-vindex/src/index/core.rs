@@ -535,6 +535,10 @@ impl GateIndex for VectorIndex {
         self.down_features_mmap.is_some()
     }
 
+    fn has_up_features(&self) -> bool {
+        self.up_features_mmap.is_some()
+    }
+
     fn gate_knn_q4(
         &self,
         layer: usize,

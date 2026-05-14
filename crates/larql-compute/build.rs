@@ -13,7 +13,13 @@ fn main() {
     build.flag("-march=armv8.2-a+dotprod");
 
     #[cfg(target_arch = "x86_64")]
-    build.flag("-mavx2");
+    {
+        if std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default() == "msvc" {
+            build.flag("/arch:AVX2");
+        } else {
+            build.flag("-mavx2");
+        }
+    }
 
     build.compile("q4_dot");
 }

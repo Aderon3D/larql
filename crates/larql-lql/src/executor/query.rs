@@ -7,6 +7,8 @@ use crate::error::LqlError;
 use super::Session;
 use super::helpers::is_content_token;
 
+use larql_vindex::GateIndex;
+
 impl Session {
     // ── WALK ──
     //
@@ -152,20 +154,37 @@ impl Session {
         // Vindex backend: walk FFN with optional dense comparison
         let (path, config, patched) = self.require_vindex()?;
 
-        if !config.has_model_weights {
-            return Err(LqlError::Execution(format!(
-                "INFER requires model weights. This vindex was built without --include-weights.\n\
-                 Rebuild: EXTRACT MODEL \"{}\" INTO \"{}\" WITH INFERENCE",
-                config.model,
-                path.display(),
-            )));
-        }
-
         let mut cb = larql_vindex::SilentLoadCallbacks;
-        let weights = larql_vindex::load_model_weights(path, &mut cb)
-            .map_err(|e| LqlError::exec("failed to load model weights", e))?;
-        let tokenizer = larql_vindex::load_vindex_tokenizer(path)
-            .map_err(|e| LqlError::exec("failed to load tokenizer", e))?;
+        let (weights, tokenizer) = if config.has_model_weights {
+            let w = larql_vindex::load_model_weights_selective(path, &mut cb, true)
+                .map_err(|e| LqlError::exec("failed to load model weights", e))?;
+            let t = larql_vindex::load_vindex_tokenizer(path)
+                .map_err(|e| LqlError::exec("failed to load tokenizer", e))?;
+            (w, t)
+        } else {
+            // Fallback: load weights from the external model path specified in index.json
+            let model_path = &config.model;
+            let weights_path = larql_inference::resolve_model_path(model_path)
+                .map_err(|_| LqlError::Execution(format!(
+                    "INFER requires model weights. They are not in the vindex, and external source was not found: {}\n\
+                     Model path: {}",
+                    model_path, model_path
+                )))?;
+            let mut w = larql_inference::load_model_dir(&weights_path)
+                .map_err(|e| LqlError::exec("failed to load external model weights", e))?;
+
+            // Only drop FFN weights if the vindex has them (to save RAM).
+            // If vindex only has gate vectors (browse mode), we must keep
+            // the model's up/down weights for inference.
+            if patched.has_up_features() && patched.has_down_features() {
+                w.drop_ffn_weights();
+            }
+
+            let t = larql_inference::load_tokenizer(&weights_path)
+                .map_err(|e| LqlError::exec("failed to load external tokenizer", e))?;
+            (w, t)
+        };
+
 
         let encoding = tokenizer
             .encode(prompt, true)
@@ -195,40 +214,27 @@ impl Session {
         let walk_ms = start.elapsed().as_secs_f64() * 1000.0;
 
         // ── KNN override check ──
-        // Must call take_residuals BEFORE take_trace (both drain the same RefCell).
-        let residuals = walk_ffn.take_residuals();
-
-        // Check KNN store for retrieval override
+        let trace_data = walk_ffn.take_data();
+        
         const KNN_COSINE_THRESHOLD: f32 = 0.75;
         let knn_layers = patched.knn_store.layers();
-        let mut knn_override: Option<(String, f32, usize)> = None; // (token, cosine, layer)
+        let mut knn_override: Option<(String, f32, usize)> = None;
 
         if !knn_layers.is_empty() {
-            for &(ref layer, ref residual) in &residuals {
-                if !knn_layers.contains(layer) { continue; }
-                if let Some((entry, cosine)) = patched.knn_store.query_top1(*layer, residual) {
+            for entry in &trace_data {
+                if !knn_layers.contains(&entry.layer) { continue; }
+                if let Some((knn_entry, cosine)) = patched.knn_store.query_top1(entry.layer, &entry.residual) {
                     if cosine > KNN_COSINE_THRESHOLD {
-                        knn_override = Some((entry.target_token.clone(), cosine, *layer));
+                        knn_override = Some((knn_entry.target_token.clone(), cosine, entry.layer));
                         break;
                     }
                 }
             }
         }
 
-        // Build trace from residuals (same logic as take_trace but inline)
-        let mut trace_layers = Vec::with_capacity(residuals.len());
-        for (layer, residual) in &residuals {
-            let r = larql_vindex::ndarray::Array1::from_vec(residual.clone());
-            let hits = patched.gate_knn(*layer, &r, 20);
-            let walk_hits: Vec<larql_vindex::WalkHit> = hits
-                .into_iter()
-                .filter_map(|(feature, gate_score)| {
-                    let meta = patched.feature_meta(*layer, feature)?;
-                    Some(larql_vindex::WalkHit { layer: *layer, feature, gate_score, meta })
-                })
-                .collect();
-            trace_layers.push((*layer, walk_hits));
-        }
+        let trace_layers: Vec<(usize, Vec<larql_vindex::WalkHit>)> = trace_data.into_iter()
+            .map(|e| (e.layer, e.hits))
+            .collect();
 
         let mut out = Vec::new();
         out.push("Predictions (walk FFN):".into());
@@ -1053,7 +1059,7 @@ impl Session {
         
         let weights = if config.has_model_weights {
             let mut cb = larql_vindex::SilentLoadCallbacks;
-            larql_vindex::load_model_weights(vindex_path, &mut cb)
+            larql_vindex::load_model_weights_selective(vindex_path, &mut cb, true)
                 .map_err(|e| LqlError::exec("failed to load model weights", e))?
         } else {
             // Fallback to original model GGUF
@@ -1063,7 +1069,7 @@ impl Session {
                     format!("EXPLAIN INFER requires model weights, and the original model at {:?} was not found.", model_path)
                 ));
             }
-            larql_models::load_gguf(model_path)
+            larql_inference::load_gguf_selective(model_path, true)
                 .map_err(|e| LqlError::exec("failed to load fallback model weights", e))?
         };
 

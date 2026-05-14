@@ -438,6 +438,15 @@ pub fn load_model_weights(
     dir: &Path,
     callbacks: &mut dyn IndexLoadCallbacks,
 ) -> Result<ModelWeights, VindexError> {
+    load_model_weights_selective(dir, callbacks, false)
+}
+
+/// Load model weights with optional filtering to save memory.
+pub fn load_model_weights_selective(
+    dir: &Path,
+    callbacks: &mut dyn IndexLoadCallbacks,
+    skip_ffn: bool,
+) -> Result<ModelWeights, VindexError> {
     let config = load_vindex_config(dir)?;
 
     if !config.has_model_weights {
@@ -511,6 +520,10 @@ pub fn load_model_weights(
         let filename = if entry.file.is_empty() { "model_weights.bin".to_string() } else { entry.file.clone() };
 
         if !mmap_cache.contains_key(&filename) {
+            // Skip mapping heavy files entirely if skip_ffn is true to save virtual memory/pagefile.
+            if skip_ffn && (filename.contains("up_weights") || filename.contains("down_weights") || filename.contains("gate_vectors")) {
+                continue;
+            }
             let fpath = dir.join(&filename);
             if fpath.exists() {
                 if let Ok(f) = std::fs::File::open(&fpath) {
@@ -545,6 +558,9 @@ pub fn load_model_weights(
 
         match entry.kind.as_str() {
             "tensor" => {
+                if skip_ffn && (entry.key.contains("proj") || entry.key.contains("ffn") || entry.key.contains("mlp")) {
+                    continue;
+                }
                 let arr = Array2::from_shape_vec((entry.shape[0], entry.shape[1]), floats)
                     .map_err(|e| VindexError::Parse(e.to_string()))?;
                 if entry.key == "lm_head.weight" {
@@ -554,26 +570,31 @@ pub fn load_model_weights(
                 }
             }
             "vector" => {
+                if skip_ffn && (entry.key.contains("proj") || entry.key.contains("ffn") || entry.key.contains("mlp")) {
+                    continue;
+                }
                 vectors.insert(entry.key.clone(), floats);
             }
             _ => {}
         }
     }
 
-    // Gate vectors from gate_vectors.bin
-    let gate_file = std::fs::File::open(dir.join("gate_vectors.bin"))?;
-    let gate_mmap = unsafe { memmap2::Mmap::map(&gate_file)? };
-    let gate_floats = crate::config::dtype::decode_floats(&gate_mmap, config.dtype);
-    let bpf = crate::config::dtype::bytes_per_float(config.dtype);
-    for info in &config.layers {
-        let float_offset = info.offset as usize / bpf;
-        let float_count = info.num_features * config.hidden_size;
-        if float_offset + float_count <= gate_floats.len() {
-            let gate_data = &gate_floats[float_offset..float_offset + float_count];
-            let gate_matrix = Array2::from_shape_vec(
-                (info.num_features, config.hidden_size), gate_data.to_vec(),
-            ).map_err(|e| VindexError::Parse(e.to_string()))?;
-            tensors.insert(arch.ffn_gate_key(info.layer), gate_matrix.into_shared());
+    if !skip_ffn {
+        // Gate vectors from gate_vectors.bin
+        let gate_file = std::fs::File::open(dir.join("gate_vectors.bin"))?;
+        let gate_mmap = unsafe { memmap2::Mmap::map(&gate_file)? };
+        let gate_floats = crate::config::dtype::decode_floats(&gate_mmap, config.dtype);
+        let bpf = crate::config::dtype::bytes_per_float(config.dtype);
+        for info in &config.layers {
+            let float_offset = info.offset as usize / bpf;
+            let float_count = info.num_features * config.hidden_size;
+            if float_offset + float_count <= gate_floats.len() {
+                let gate_data = &gate_floats[float_offset..float_offset + float_count];
+                let gate_matrix = Array2::from_shape_vec(
+                    (info.num_features, config.hidden_size), gate_data.to_vec(),
+                ).map_err(|e| VindexError::Parse(e.to_string()))?;
+                tensors.insert(arch.ffn_gate_key(info.layer), gate_matrix.into_shared());
+            }
         }
     }
 
@@ -584,7 +605,9 @@ pub fn load_model_weights(
     let lm_head = lm_head_loaded.unwrap_or_else(|| embed.clone());
 
     Ok(ModelWeights {
-        tensors, vectors, embed, lm_head,
+        tensors, vectors, embed,
+        lazy_embed: None,
+        lm_head,
         num_layers: cfg.num_layers,
         hidden_size: cfg.hidden_size,
         intermediate_size: cfg.intermediate_size,

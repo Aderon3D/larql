@@ -151,20 +151,6 @@ impl ModelArchitecture for Gemma4Arch {
         self.kv_sources.get(layer).copied().flatten()
     }
 
-    // Gemma 4 uses QK-norm which already normalizes dot products.
-    // No additional 1/sqrt(head_dim) scaling is applied (scaling = 1.0).
-    fn attention_scale(&self) -> f64 {
-        1.0
-    }
-
-    fn attention_scale_for_layer(&self, _layer: usize) -> f64 {
-        1.0
-    }
-
-    fn layer_scalar_key(&self, layer: usize) -> Option<String> {
-        Some(format!("{}layer_scalar", self.layer_prefix(layer)))
-    }
-
     // ── QK norm (inherited from Gemma 3) ──
 
     fn attn_q_norm_key(&self, layer: usize) -> Option<String> {
@@ -181,11 +167,32 @@ impl ModelArchitecture for Gemma4Arch {
         ))
     }
 
+    // ── Per-Layer Embedding (PLE) gate/projection keys ──
+    // GGUF uses "inp_gate" and "proj" instead of the HF "per_layer_input_gate" / "per_layer_projection"
+
+    fn per_layer_input_gate_key(&self, layer: usize) -> Option<String> {
+        if self.has_per_layer_embeddings() {
+            Some(format!("{}inp_gate.weight", self.layer_prefix(layer)))
+        } else {
+            None
+        }
+    }
+
+    fn per_layer_projection_key(&self, layer: usize) -> Option<String> {
+        if self.has_per_layer_embeddings() {
+            Some(format!("{}proj.weight", self.layer_prefix(layer)))
+        } else {
+            None
+        }
+    }
+
     // ── Gemma-family behavior ──
 
-    // Gemma 4 stores norm weights as the full multiplier (no +1 offset).
-    // Unlike Gemma 2/3 which used 1+weight, Gemma 4's Gemma4RMSNorm applies weight directly.
     fn norm_weight_offset(&self) -> f32 {
+        0.0
+    }
+
+    fn qk_norm_weight_offset(&self) -> f32 {
         0.0
     }
 
@@ -194,6 +201,7 @@ impl ModelArchitecture for Gemma4Arch {
     }
 
     fn embed_scale(&self) -> f32 {
+        // Gemma mandatory: sqrt(hidden_size) = sqrt(2560) ≈ 50.596
         (self.config.hidden_size as f32).sqrt()
     }
 
@@ -241,7 +249,7 @@ mod tests {
             q_lora_rank: None,
             rope_scaling: None,
             attn_logit_softcapping: None,
-            final_logit_softcapping: None,
+            final_logit_softcapping: Some(30.0),
             query_pre_attn_scalar: None,
             embedding_multiplier: None,
             residual_multiplier: None,
