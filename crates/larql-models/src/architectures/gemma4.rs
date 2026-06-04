@@ -167,24 +167,6 @@ impl ModelArchitecture for Gemma4Arch {
         ))
     }
 
-    // ── Per-Layer Embedding (PLE) gate/projection keys ──
-    // GGUF uses "inp_gate" and "proj" instead of the HF "per_layer_input_gate" / "per_layer_projection"
-
-    fn per_layer_input_gate_key(&self, layer: usize) -> Option<String> {
-        if self.has_per_layer_embeddings() {
-            Some(format!("{}inp_gate.weight", self.layer_prefix(layer)))
-        } else {
-            None
-        }
-    }
-
-    fn per_layer_projection_key(&self, layer: usize) -> Option<String> {
-        if self.has_per_layer_embeddings() {
-            Some(format!("{}proj.weight", self.layer_prefix(layer)))
-        } else {
-            None
-        }
-    }
 
     // ── Gemma-family behavior ──
 
@@ -219,6 +201,18 @@ impl ModelArchitecture for Gemma4Arch {
         } else {
             self.config.rope_base
         }
+    }
+
+    fn layer_scalar_key(&self, layer: usize) -> Option<String> {
+        Some(format!("{}layer_scalar", self.layer_prefix(layer)))
+    }
+
+    fn attention_scale(&self) -> f64 {
+        1.0
+    }
+
+    fn attention_scale_for_layer(&self, _layer: usize) -> f64 {
+        1.0
     }
 }
 

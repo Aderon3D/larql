@@ -211,8 +211,10 @@ fn parse_model_config(config: &serde_json::Value) -> ModelConfig {
         .as_u64()
         .map(|v| v as usize)
         .filter(|&v| v > 0);
-    
-    let global_head_dim = if head_dim_swa.is_some() { Some(head_dim) } else { None };
+    let global_head_dim = text_config["global_head_dim"]
+        .as_u64()
+        .map(|v| v as usize)
+        .or_else(|| if head_dim_swa.is_some() { Some(head_dim) } else { None });
 
     ModelConfig {
         model_type,

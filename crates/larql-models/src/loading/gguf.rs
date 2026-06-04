@@ -581,6 +581,12 @@ pub fn normalize_gguf_key(name: &str) -> String {
         .replace("post_attention_norm.", "post_attention_layernorm.")
         .replace("ffn_norm.", "pre_feedforward_layernorm.")
         .replace("post_ffw_norm.", "post_feedforward_layernorm.")
+        // Gemma 4 PLE-specific renames (GGUF names differ from HF convention)
+        .replace("post_norm.", "post_per_layer_input_norm.")
+        .replace("per_layer_token_embd.", "per_layer_embed_tokens.")
+        .replace("per_layer_proj_norm.", "per_layer_projection_norm.")
+        .replace(".inp_gate.weight", ".per_layer_input_gate.weight")
+        .replace(".proj.weight", ".per_layer_projection.weight")
         .replace("token_embd.", "embed_tokens.")
         .replace("output_norm.", "norm.")
         .replace("output.", "lm_head.")
@@ -646,7 +652,7 @@ mod tests {
         file.flush().unwrap();
 
         let gguf = GgufFile::open(&path).unwrap();
-        let (tensors, _) = gguf.load_tensors().unwrap();
+        let (tensors, _, _) = gguf.load_tensors(false).unwrap();
         let down = tensors.get("layers.0.mlp.down_proj.weight").unwrap();
 
         assert_eq!(down.shape(), &[2, 4]);
