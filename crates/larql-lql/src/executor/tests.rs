@@ -411,7 +411,7 @@ fn make_test_weights() -> larql_inference::ModelWeights {
         tensors, vectors, embed, lm_head,
         num_layers, hidden_size: hidden, intermediate_size: intermediate,
         vocab_size, head_dim: hidden, num_q_heads: 1, num_kv_heads: 1,
-        rope_base: 10000.0, arch,
+        rope_base: 10000.0, arch, lazy_embed: None,
     }
 }
 

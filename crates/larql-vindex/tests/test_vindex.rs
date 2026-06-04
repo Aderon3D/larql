@@ -754,6 +754,7 @@ fn v2_config_full_round_trip() {
             layer_types: None, attention_k_eq_v: false,
             num_kv_shared_layers: None, per_layer_embed_dim: None,
             rope_local_base: None, query_pre_attn_scalar: None,
+            head_dim_swa: None, sliding_window_pattern_bool: None,
         }),
     };
 
@@ -829,6 +830,7 @@ fn v2_config_with_moe() {
             layer_types: None, attention_k_eq_v: false,
             num_kv_shared_layers: None, per_layer_embed_dim: None,
             rope_local_base: None, query_pre_attn_scalar: None,
+            head_dim_swa: None, sliding_window_pattern_bool: None,
         }),
     };
 
@@ -950,6 +952,7 @@ fn moe_layer_info_round_trip() {
             layer_types: None, attention_k_eq_v: false,
             num_kv_shared_layers: None, per_layer_embed_dim: None,
             rope_local_base: None, query_pre_attn_scalar: None,
+            head_dim_swa: None, sliding_window_pattern_bool: None,
         }),
     };
 
@@ -1738,6 +1741,7 @@ fn make_synthetic_model() -> larql_models::ModelWeights {
         num_kv_heads: 1,
         rope_base: 10000.0,
         arch,
+        lazy_embed: None,
     }
 }
 
