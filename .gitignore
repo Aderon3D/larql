@@ -36,3 +36,11 @@ vindexes/
 # Generated vindex binary data (embeddings / gate-vectors can be GBs)
 # Keep index.json and tokenizer.json (small, useful as manifests)
 ablation_project/indices/**/*.bin
+# Vindex data
+ablation_project/indices/
+# Results and patches
+ablation_project/results/
+ablation_project/patches/
+# Temp text dumps
+*.txt
+
